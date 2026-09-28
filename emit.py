@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OHCA map packaging: one ohc_derive `map` blob -> the gridded per-cell deliverable.
+"""OHCA map packaging: one ogp_derive `map` blob -> the gridded per-cell deliverable.
 
 The factory has already done the analysis — the cross-layer mask, the n_fac combine over constituents,
 and the per-cell anomaly against the baseline window. Its blob carries `map` (with `map_sd` when the
@@ -186,12 +186,12 @@ def filename(level, tag, token, product_name, author):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="OHCA map packaging: ohc_derive `map` blob -> gridded deliverable")
-    ap.add_argument("blobs", nargs="+", help="ohc_derive output NetCDFs built with --quantities map")
+    ap = argparse.ArgumentParser(description="OHCA map packaging: ogp_derive `map` blob -> gridded deliverable")
+    ap.add_argument("blobs", nargs="+", help="ogp_derive output NetCDFs built with --quantities map")
     ap.add_argument("--tag", required=True, help="provenance tag: filename token + provenance_tag attr")
     ap.add_argument("--provenance-link", default=None, help="URL/path to the provenance record")
     ap.add_argument("--code-version", required=True,
-                    help="URL to the exact ohc_map_emitter code (commit/release); stamped in config_record")
+                    help="URL to the exact map_ogp_emitter code (commit/release); stamped in config_record")
     ap.add_argument("--product-name", required=True,
                     help="product_name string, the first of the filename's trailing pair and in config_record "
                          "(e.g. LocalGP)")
@@ -208,7 +208,7 @@ def main():
     for path in cfg.blobs:
         blob = xr.open_dataset(path)
         if "map" not in blob:
-            raise SystemExit("%s carries no map; run ohc_derive with --quantities map" % path)
+            raise SystemExit("%s carries no map; run ogp_derive with --quantities map" % path)
         dest = os.path.join(cfg.out, filename(blob.attrs["level"], cfg.tag, _file_token(blob),
                                               cfg.product_name, cfg.author))
         out = build_dataset(blob, cfg.tag, cfg.provenance_link, cfg.citation, cfg.product_name)

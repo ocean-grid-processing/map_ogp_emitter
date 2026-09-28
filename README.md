@@ -1,19 +1,23 @@
-# ohc_map_emitter
+# map_ogp_emitter
 
-`ohc_map_emitter` packages one `ohc_derive` blob into a **combined-layer OHC anomaly map** — one
-NetCDF per level, `ohca_map_<tag>_<lo>_<hi>_dbar_<data>_tw<baseline>.nc`, ME4OH layout, monthly, per grid cell.
+`map_ogp_emitter` packages one `ogp_derive` blob into a **combined-layer OHC anomaly map** — one
+NetCDF per synthetic level, `ohca_map_<tag>_<lo>_<hi>_dbar_<data>_tw<baseline>_<product_name>_<author>.nc`,
+ME4OH layout, monthly, per grid cell.
 
 ```
-ohc_ingest ─▶ publish ─▶ ohc_derive (--quantities map) ─▶ ohc_map_emitter ─▶ per-level map .nc
+localgp_ogp_ingest ─▶ publish ─▶ ogp_derive (--quantities map) ─▶ map_ogp_emitter ─▶ per-level map .nc
 ```
 
-The analysis is all upstream. `ohc_derive` does the cross-layer mask, the `n_fac` combine over
+The analysis is all upstream. `ogp_derive` does the cross-layer mask, the `n_fac` combine over
 constituents, the per-cell anomaly against the baseline window, and the ensemble → SD collapse — the
 map is just another derive deliverable (`--quantities map`), the gridded sibling of `ohca`: where
 `ohca` area-integrates the masked field, `map` carries it through on the grid. Its blob hands over
 `map` (with `map_sd` when the ensemble was on) as the combined per-cell OHC density anomaly in TJ/m²,
-on the native monthly grid, plus `area_m2`, the `level`, and the `time_window` it was built with. This
-emitter is only the packaging: scale to J/m², lay the grid out in ME4OH order, relabel, and write.
+on the native monthly grid, plus the `level` and the `time_window` it was built with. This emitter is
+only the packaging: scale to J/m², lay the grid out in ME4OH order, relabel, and write.
+
+This emitter is OHC-specific: the `×1e12` scale and the `ohca`/`ohca_std` names are hard-wired to the
+OHC `[quantity]` table's published units (TJ/m²).
 
 > **Units:** **`ohca` in J/m²** (density; the map is per-area, so multiplying out by cell area is left
 > to the consumer). Conversion is `ohca = map[TJ/m²] × 1e12`; the `_std` scales the same way.
@@ -30,55 +34,98 @@ ohca_std(x, t) = blob.map_sd × 1e12      # J/m², present when the ensemble was
 The grid keeps its **native monthly TIME axis** from the submissions (re-encoded to days-since-1900 on
 write — the loader decodes it, so the units are pinned back). `LONGITUDE`/`LATITUDE` and their attrs
 carry straight from the blob. The `low`/`high` in the filename come from the blob's `level` attr; the
-anomaly baseline label comes from its `time_window`.
+`<data>` span from the blob's own time axis; the anomaly baseline label (`tw<baseline>`, and the
+`ohca` long_name) from its `time_window` — a windowless derive run labels the baseline with the data
+span itself.
 
 **Spread convention.** The `_std` is derive's ensemble spread of the map deliverable — the member
-spread of the **anomaly**, `n_fac` worst-case summed across constituents — i.e. the same collapse that
+spread of the **anomaly**, `n_fac` linear summed across constituents — i.e. the same collapse that
 produces `ohca_sd` in the series. So the map's uncertainty matches the OHCA series' by construction; the
 value is the anomaly and the `_std` is its ensemble 1-sigma.
 
 ## Building the input
 
-`ohc_map_emitter` consumes one `ohc_derive` blob per synthetic level, built with `--quantities map`:
+`map_ogp_emitter` consumes one `ogp_derive` blob per synthetic level, built along the LocalGP OHC
+happy path in [`ogp_derive/examples/derive_ohc.slurm`](../ogp_derive/examples/derive_ohc.slurm) with
+`map` among the quantities:
 
 ```bash
-python ../ohc_derive/run.py OHC_<constituents>.nc \
-    --level 0_2000 --bathy etopo60.nc --quantities map \
-    --tag <tag> --code-version URL --out <dir>
+python ../ogp_derive/run.py OHC_<tag>*.nc \
+    --levels levels/localgp.toml --level 0_2000 --time-window 2005:2024 \
+    --quantities ohca,ohu,ohca_trend,ohu_trend,map --mask contiguous_from_top \
+    --bathy etopo60.cdf --tag <tag> --code-version URL \
+    --product-name LocalGP --author Giglio_etal2026 --citation "…" --out <dir>
 ```
 
-`--quantities map` can also ride along with the series quantities in one run (`--quantities
-ohca,ohu,map`) so the mask pass is shared — the same blob then feeds both this emitter and
-`ohc_ohca_ohu_emitter`, each reading only the variables it packages. A dedicated `map` run keeps the
-gridded member cube (≈ 7–14 GB) isolated from the series jobs; either way works.
+`map` rides along with the series quantities so the mask pass is shared — the same blob then feeds
+this emitter, `ohca_ohu_ogp_emitter` and `gcos_ogp_emitter`, each reading only the variables it
+packages. A dedicated `--quantities map` run also works and keeps the gridded member cube (see
+Memory) isolated from the series jobs.
 
-The anomaly baseline is set **at the derive step** by `--time-window` (default: whole record, matching
-the OHCA series; pass `2005:2024` to match the GCOS convention). Each blob **must** carry:
+The anomaly baseline is set **at the derive step** by `--time-window`; it becomes this deliverable's
+`tw<baseline>` token and `time_window` attr, so one derive run per baseline gives one map per baseline.
+Each blob **must** carry:
 
 - data var **`map`** (per-cell, monthly, TJ/m²), and its **`map_sd`** companion when the derive run
-  kept the ensemble. The emitter errors if `map` is absent, and skips `ohca_std` when `map_sd` isn't
+  kept the ensemble. The emitter exits if `map` is absent, and skips `ohca_std` when `map_sd` isn't
   present.
-- attrs **`level`** and **`time_window`** (which becomes the anomaly baseline label).
+- attrs **`level`** and **`time_window`**.
+
+Nothing else in the blob is read: `area_m2`, the `quantity` table and the per-variable
+`field_units`/`reduction` stamps ride along inside the forwarded provenance but this emitter does not
+consult them.
 
 ## Usage
 
 ### Test
 ```bash
-docker image build -t ohc_map_emitter:test .
-docker container run -v $(pwd):/app ohc_map_emitter:test pytest
+docker image build -t map_ogp_emitter:test .
+docker container run -v $(pwd):/app map_ogp_emitter:test pytest
 ```
 
 ### Run
+
+One blob in, one map out, per level. The happy path is [`emit.slurm`](emit.slurm), which takes
+`<baseline_window> <level>` and globs the matching derive blob out of the results directory;
+[`run.sh`](run.sh) loops it over the windows and levels of a release:
+
+```bash
+sbatch emit.slurm 2005_2024 0_2000
+```
+
+or directly:
+
 ```bash
 python emit.py derive_<tag>_<data>_tw<baseline>_<level>.nc [more levels …] --tag <tag> --code-version URL \
     --product-name LocalGP --author Giglio_etal2026 --citation "…" [--provenance-link URL] [--out DIR]
 ```
 
-`--product-name` / `--author` become the filename's trailing pair (`…_<product_name>_<author>.nc`) and are recorded
-in `config_record`; `--citation` is written to a standalone top-level `citation` attribute.
+`--product-name` / `--author` become the filename's trailing pair (`…_<product_name>_<author>.nc`) and
+are recorded in `config_record`; `--citation` is written to a standalone top-level `citation` attribute.
+`-999` fill on every data variable on write (NaN off-footprint lands as `-999` on disk and decodes back
+to NaN on read).
 
-One blob in, one map out, per level. `-999` fill on every data variable on write (NaN off-footprint
-lands as `-999` on disk and decodes back to NaN on read).
+#### emit.py options
+
+All configuration is on the command line — no env, no config file. Every resolved option lands in
+`config_record` (under this stage's `run_config`), except `--citation`, which has its own attr.
+
+| option | required | default | what it does |
+|---|:--:|---|---|
+| `derive_*.nc` (positional, 1+) | **yes** | | `ogp_derive` blobs, one per synthetic level (`derive_<tag>_<data>_tw<baseline>_<level>.nc`). Each must carry `map` |
+| `--tag` | **yes** | | run token in the filename and the `provenance_tag` attr. Used verbatim; should match the tag the blob was derived under |
+| `--code-version` | **yes** | | URL to the exact `map_ogp_emitter` code (commit/release); recorded as this stage's `code_version` inside `config_record` |
+| `--product-name` | **yes** | | product_name string; first of the filename's trailing pair (whitespace-stripped, case preserved), a standalone top-level `product_name` attr, and recorded in `config_record` |
+| `--author` | **yes** | | author string; last of the filename's trailing pair (e.g. `Giglio_etal2026`) and recorded in `config_record` |
+| `--citation` | **yes** | | citation sentence; written to the standalone top-level `citation` attr (kept out of `config_record` so it isn't duplicated) |
+| `--provenance-link` | | *(none)* | URL/path to the provenance record; written to the `provenance_link` attr |
+| `--out` | | `.` | output directory (created if absent) |
+
+## Output and provenance
+
+Data: `ohca(LONGITUDE, LATITUDE, TIME)` and, with the ensemble, `ohca_std`, both J/m². Global attrs:
+`level`, `time_window`, `provenance_tag`, `provenance_link` (when given), `citation`, `product_name`,
+and one `config_record`.
 
 **Provenance chain.** Each map is built from one derive blob, so this step is a 1-in-1-out courier: it
 rolls that blob's whole provenance chain forward (every `*_run_config` / `*_run_facts` /
@@ -90,34 +137,23 @@ config_record = {
   "localgp_ingest":  {"run_config": {…}, "run_facts": {…}, "code_version": "…"},
   "localgp_publish": {…},
   "ohc_derive":      {…},
-  "ohc_map_emitter": {"run_config": {resolved args}, "run_facts": {level, window, …}, "code_version": "…"}
+  "ohc_map_emitter": {"run_config": {resolved args}, "run_facts": {level, time_window, quantities_present, ensemble, source_blob}, "code_version": "…"}
 }
 ```
 
+The stage keys are the pipeline's provenance contract and predate the repo renames: `ohc_derive` is
+written by `ogp_derive` and `ohc_map_emitter` by this emitter.
+
 *Why one attribute:* a dozen separate global attributes tips HDF5 into **dense (fractal-heap) attribute
 storage**, whose exact layout some netcdf builds mis-read; a single attribute keeps the file at ≤ 8
-global attributes (`level`, `time_window`, `provenance_tag`, `provenance_link`, `config_record`), i.e.
-**compact** storage, which every reader handles. The global `provenance_tag` / `provenance_link` stay
-separate (the run's discoverable identity).
+global attributes, i.e. **compact** storage, which every reader handles. The global `provenance_tag` /
+`provenance_link` stay separate (the run's discoverable identity).
 
 The per-constituent `localgp_*` blocks are **DRY'd**: each `{15_20:{…}, 15_300:{…}, …}` fan-out is
 factored into `{"shared": {common config}, "per_constituent": {only what differs}}`, and a fan-out
 whose entries fully agree collapses to a bare value. Lossless and reversible, driven by the
 `constituents` roster in `ohc_derive.run_facts` — so only genuine fan-outs are touched and a value like
 `n_fac`, nested inside a non-fanned block, is never mistaken for one.
-
-#### emit.py options
-
-| option | default | effect |
-|---|---|---|
-| `derive_*.nc` (positional, 1+) | *(required)* | `ohc_derive` blobs, one per synthetic level (`derive_<tag>_<data>_tw<baseline>_<level>.nc`). Each must carry `map`. |
-| `--tag` | *(required)* | run token in the filename (`ohca_map_<tag>_<lo>_<hi>_dbar_<data>_tw<baseline>_<product_name>_<author>.nc`) and the `provenance_tag` attr. Used verbatim; should match the tag the blob was derived under. |
-| `--provenance-link` | *(none)* | URL/path to the provenance record; written to the `provenance_link` attr. |
-| `--code-version` | *(required)* | URL to the exact ohc_map_emitter code (commit/release); stamped inside `config_record`. |
-| `--product-name` | *(required)* | product_name string; first of the filename's trailing pair (whitespace-stripped, case preserved), a standalone top-level `product_name` attr, and recorded in `config_record`. |
-| `--author` | *(required)* | author string; last of the filename's trailing pair (e.g. `Giglio_etal2026`) and recorded in `config_record`. |
-| `--citation` | *(required)* | citation sentence; written to the standalone top-level `citation` attr (kept out of `config_record` so it isn't duplicated). |
-| `--out` | `.` | output directory (created if absent). |
 
 ## Validation
 
@@ -131,18 +167,19 @@ area-weighting the map and annualizing reproduces the OHCA file's `ohca` series 
 python postflight_integral_check.py --map ohca_map_*.nc --ohca ohca_ohu_*.nc
 ```
 
-Match the baselines (both whole-record, or both the same `--time-window`) when cross-checking. The
-check is a regression guard rather than a discrepancy hunt now — the footprint can't drift, because
-there's a single mask upstream instead of a second copy here.
+Files are paired by their `level` attr; match the baselines (both the same `tw<baseline>`) when
+cross-checking. The check is a regression guard rather than a discrepancy hunt — the footprint can't
+drift, because there's a single mask upstream instead of a second copy here.
 
 ## Memory
 
-With `--quantities map`, derive materializes the combined `(realization, time, lat, lon)` cube — ≈ 7–14
-GB per level (f32/f64). Fine on a big node; run `map` as its own derive job to keep it off the series
-jobs, or fold it into the series run to share the mask pass at the cost of holding the grid alongside.
+With `map` among the quantities, derive materializes the combined `(realization, time, lat, lon)` cube
+— ≈ 7–14 GB per level (f32/f64). Fine on a big node; run `map` as its own derive job to keep it off
+the series jobs, or fold it into the series run to share the mask pass at the cost of holding the grid
+alongside.
 
-## Open / first-pass details
+## Notes
 
-- **Variable names** (`ohca`, `ohca_std`) and the **filename** are our choice — no target map file to
-  match, unlike OHCA/OHU. Reconcile if a map submission spec turns up.
-- **"J/m²"** confirmed (density, not per-cell integrated Joules).
+- **Variable names** (`ohca`, `ohca_std`) and the **filename** are our choice — there is no target map
+  file to match, unlike OHCA/OHU and GCOS. Reconcile if a map submission spec turns up.
+- **J/m²** is a density, not per-cell integrated joules.
